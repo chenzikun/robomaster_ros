@@ -34,6 +34,11 @@ DEFAULT_TWIST_ERROR_ANGULAR_XY = 0.01
 DEFAULT_TWIST_ERROR_ANGULAR_Z = 0.03
 DEFAULT_ACCELERATION_ERROR = 0.1
 
+# EP 麦轮：使能后须同时清 wheel + twist 通道；长时间无 cmd_vel 须 keepalive 零速。
+TWIST_ZERO_EPS = 1e-4
+CHASSIS_ZERO_KEEPALIVE_HZ = 20.0
+CHASSIS_CMD_STALE_SEC = 0.2
+
 
 # rmp -> [linear] speed
 def linear_speed_from_rpm(value: float) -> float:
@@ -201,6 +206,8 @@ class Chassis(Module):
         self.engage_server = node.create_service(std_srvs.srv.SetBool, 'engage_wheels',
                                                  self.engage_cb)
         node.add_on_set_parameters_callback(self.set_params_cb)
+        self._last_twist_rx = 0.0
+        node.create_timer(1.0 / CHASSIS_ZERO_KEEPALIVE_HZ, self._chassis_zero_keepalive)
 
     @property
     def odom_twist_in_odom(self) -> bool:
@@ -307,10 +314,32 @@ class Chassis(Module):
 
         return rcl_interfaces.msg.SetParametersResult(successful=True)
 
+    def _twist_is_zero(self, msg: geometry_msgs.msg.Twist) -> bool:
+        return (
+            abs(msg.linear.x) <= TWIST_ZERO_EPS
+            and abs(msg.linear.y) <= TWIST_ZERO_EPS
+            and abs(msg.angular.z) <= TWIST_ZERO_EPS
+        )
+
+    def _stop_chassis_outputs(self) -> None:
+        self.api.drive_wheels(0, 0, 0, 0, timeout=self.timeout)
+        self.api.drive_speed(x=0.0, y=0.0, z=0.0, timeout=self.timeout)
+
+    def _chassis_zero_keepalive(self) -> None:
+        if not self.node.connected:
+            return
+        now = time.monotonic()
+        if self._last_twist_rx == 0.0 or (now - self._last_twist_rx) >= CHASSIS_CMD_STALE_SEC:
+            self._stop_chassis_outputs()
+
     def engage(self, value: bool) -> None:
         proto = robomaster.protocol.ProtoChassisSetWorkMode()
         proto._mode = 1 if value else 0
         self.api._send_sync_proto(proto)
+        if value:
+            self._stop_chassis_outputs()
+        else:
+            self.api.drive_wheels(0, 0, 0, 0)
         self.logger.info(f"{'[Chassis] Engaged' if value else 'Disengaged'} wheel motors")
 
     def engage_cb(self, request: std_srvs.srv.SetBool.Request,
@@ -354,6 +383,10 @@ class Chassis(Module):
             self.api.unsub_status()
 
     def has_received_twist(self, msg: geometry_msgs.msg.Twist) -> None:
+        self._last_twist_rx = time.monotonic()
+        if self._twist_is_zero(msg):
+            self._stop_chassis_outputs()
+            return
         if self.twist_to_wheel_speeds:
             front_left, front_right, rear_left, rear_right = wheel_speeds_from_twist(
                 msg.linear.x, msg.linear.y, msg.angular.z)
