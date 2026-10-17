@@ -330,8 +330,10 @@ class Chassis(Module):
     def _chassis_zero_keepalive(self) -> None:
         if not self.node.connected:
             return
+        if self._last_twist_rx == 0.0:
+            return
         now = time.monotonic()
-        if self._last_twist_rx == 0.0 or (now - self._last_twist_rx) >= CHASSIS_CMD_STALE_SEC:
+        if (now - self._last_twist_rx) >= CHASSIS_CMD_STALE_SEC:
             self._stop_chassis_outputs()
 
     def engage(self, value: bool) -> None:
