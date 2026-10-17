@@ -208,9 +208,8 @@ class Chassis(Module):
         node.add_on_set_parameters_callback(self.set_params_cb)
         self._last_twist_rx = 0.0
         node.create_timer(1.0 / CHASSIS_ZERO_KEEPALIVE_HZ, self._chassis_zero_keepalive)
-        # Clear stale chassis output at startup without changing EP work mode; disabling
-        # work mode makes the SDK reject robotic-arm actions.
-        self._stop_chassis_outputs()
+        # EP keeps chassis work mode across driver restarts; always start from a safe, disengaged state.
+        self.engage(False)
 
     @property
     def odom_twist_in_odom(self) -> bool:
