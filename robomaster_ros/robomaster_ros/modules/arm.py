@@ -23,16 +23,6 @@ from ..utils import rate, nearest_rate, Rate
 
 
 def arm_joint_state(left_motor: float, right_motor: float) -> Dict[str, float]:
-    # return {
-    #     'arm_1_joint': right_motor,
-    #     'rod_joint': left_motor,
-    #     'triangle_joint': -right_motor,
-    #     'arm_2_joint': left_motor - right_motor,
-    #     'endpoint_bracket_joint': -left_motor,
-    #     'rod_1_joint': left_motor,
-    #     'rod_3_joint': right_motor - left_motor,
-    #     'rod_2_joint': right_motor
-    # }
     # Now that the urdf defines dependent joints, we can skip most of them
     return {
         'arm_1_joint': right_motor,
@@ -86,12 +76,10 @@ class Arm(Module):
             self.servo_raw_state_pub = node.create_publisher(
                 robomaster_msgs.msg.ServoRawState, 'servo_raw_state', 1)
         cbg = rclpy.callback_groups.MutuallyExclusiveCallbackGroup()
-        # self.logger.info(f"[Arm] Callback group {cbg}")
         self._move_arm_action_server = rclpy.action.ActionServer(
             node, robomaster_msgs.action.MoveArm, 'move_arm', self.execute_move_arm_callback,
             goal_callback=self.new_move_arm_goal_callback,
             cancel_callback=self.cancel_move_arm_callback, callback_group=cbg)
-        # self.goal_handle: Optional[rclpy.action.server.ServerGoalHandle] = None
         self.action: Optional[robomaster.action.Action] = None
         node.create_subscription(geometry_msgs.msg.Vector3, 'cmd_arm',
                                  self.has_received_velocity_command, 10)
@@ -99,45 +87,37 @@ class Arm(Module):
                                  self.has_received_position_command, 1)
         node.add_on_set_parameters_callback(self.set_params_cb)
 
+    def _start_arm_action(self, x_mm: int, z_mm: int, *, relative: bool) -> None:
+        """Start arm motion through the SDK public API; raw client messages are ignored on EP."""
+        if self.action:
+            try:
+                abort_action(self.robot, self.action)
+            except Exception as exc:
+                self.logger.warning(f'[Arm] Failed aborting previous action: {exc}')
+        action_fn = self.api.move if relative else self.api.moveto
+        try:
+            self.action = action_fn(x=x_mm, y=z_mm)
+            self.logger.info(
+                f"[Arm] Start {'relative' if relative else 'absolute'} move x={x_mm} y={z_mm}: "
+                f"{self.action}"
+            )
+        except RuntimeError as exc:
+            self.logger.warning(f'[Arm] Failed creating arm action {exc}; remove current action')
+            remove_action_with_target(
+                self.robot, robomaster.robotic_arm.RoboticArmMoveAction._target)
+            self.action = action_fn(x=x_mm, y=z_mm)
+
     def has_received_velocity_command(self, msg: geometry_msgs.msg.Vector3) -> None:
-        # TODO(Jerome): verify that we need to set a new id each time
-        # -> no, it seems id = 1 is fine (0 is not)
-        # Testing with the joypad, it seems the behavior is not very robust
-        # e.g., it seems that sending a 0, 0 will make the arm fall down
-        # maybe it releases the motors?
-        # I think that it fixes the position at the begin of the action (id)
-        # so it's not really relative to the current position but to the position
-        # at the first command (at least with action_id = 1)
         x = int(msg.x * 1000)
         z = int(msg.z * 1000)
-        # x = 0
-        # y = 0
-        # self.logger.info(f"delta ({x}, {z}) from ({self.x}, {self.z})")
-        # absolute coords works fine
-        action = robomaster.robotic_arm.RoboticArmMoveAction(self.x + x, self.z + z, z=0, mode=1)
-        # relative have the above problem, even when I abort the [previous] action
-        # action = robomaster.robotic_arm.RoboticArmMoveAction(x, z, z=0, mode=0)
-        # it could be that relative as a slightly higher range
-        # will sending a command break the current action?
-        # action._action_id = 1
-        action._action_id = action._get_next_action_id()
-        msg = self.robot._action_dispatcher.get_msg_by_action(action)
-        #  msg._proto._action_ctrl = 0
-        # action._action_id -= 1
-        # self.robot.client.send_msg(msg)
-        # action._action_id += 1
-        # msg._proto._action_ctrl = 1
-        self.robot.client.send_msg(msg)
+        if x == 0 and z == 0:
+            return
+        self._start_arm_action(x, z, relative=True)
 
     def has_received_position_command(self, msg: geometry_msgs.msg.Point) -> None:
-        # self.node.get_logger().info(f"[Arm] arm position command {msg}")
         x = int(msg.x * 1000)
         z = int(msg.z * 1000)
-        action = robomaster.robotic_arm.RoboticArmMoveAction(x, z, z=0, mode=1)
-        action._action_id = action._get_next_action_id()
-        msg = self.robot._action_dispatcher.get_msg_by_action(action)
-        self.robot.client.send_msg(msg)
-
+        self._start_arm_action(x, z, relative=False)
 
     def subscribe(self, rate: Rate) -> None:
         if rate:
@@ -175,24 +155,19 @@ class Arm(Module):
                 time.sleep(0.1)
 
     def publish_sensor_raw_state(self, msg: ServoData) -> None:
-        # self.logger.info(f'publish_sensor_raw_state servo {msg}')
         omsg = robomaster_msgs.msg.ServoRawState()
         for i in range(4):
             omsg.valid[i] = (msg[0][i] != 0)
             omsg.speed[i] = msg[1][i]
             omsg.value[i] = msg[2][i]
-        # self.logger.info(f"publish_sensor_raw_state -> {omsg}")
         self.servo_raw_state_pub.publish(omsg)
 
     # (valid, speed, angle)
     def updated_arm_servo(self, msg: ServoData) -> None:
-        # self.logger.info(f'arm servo {msg}')
         for v in self.servos.values():
             v.valid = (msg[0][v.index] != 0)
             if v.valid:
-                # v.speed = msg[1][v.index_] * SERVO2RAD
                 v.value = msg[2][v.index]
-                # print(v.value, v.bias, v.angle)
         right_motor = self.servos['right_motor']
         left_motor = self.servos['left_motor']
         if (right_motor.valid and left_motor.valid):
@@ -212,7 +187,6 @@ class Arm(Module):
     def execute_move_arm_callback(self, goal_handle: Any) -> robomaster_msgs.action.MoveArm.Result:
         # TODO(jerome): Complete with failures, ...
         request = goal_handle.request
-        # timeout: Optional[float] = None
         timeout: float = 5.0
         if request.relative:
             f = self.api.move
@@ -240,12 +214,9 @@ class Arm(Module):
         feedback_msg = robomaster_msgs.action.MoveArm.Feedback()
 
         def cb() -> None:
-            # self.logger.info(f'Moving arm ... {action._percent}')
             feedback_msg.progress = cast(robomaster.action.Action, new_action)._percent * 0.01
             goal_handle.publish_feedback(feedback_msg)
 
-        # add_cb(self.action, cb)
-        # self.action.wait_for_completed(timeout=timeout)
         wait_action(new_action, cb, timeout=timeout)
 
         if goal_handle.is_cancel_requested:
@@ -271,8 +242,6 @@ class Arm(Module):
         return rclpy.action.server.GoalResponse.ACCEPT
 
     def cancel_move_arm_callback(self, goal_handle: Any) -> rclpy.action.CancelResponse:
-        # self.logger.warn('It is not possible to cancel onboard actions')
-        # return rclpy.action.CancelResponse.REJECT
         if self.action:
             self.node.executor.create_task(self._stop_action)
         return rclpy.action.CancelResponse.ACCEPT
@@ -280,12 +249,6 @@ class Arm(Module):
     def _stop_action(self) -> None:
         if self.action:
             self.logger.info('[Arm] Canceling action')
-            # ABORTED, which would be a more corrent state, is not handled as a completed state
-            # by the SDK, therefore we use FAILED
-            # Specific:
-            # self.action._changeto_state(robomaster.action.ACTION_FAILED)
-            # self.api.move(x=0, y=0).wait_for_completed()
-            # Generic:
             abort_action(self.robot, self.action)
 
     # (x, z) in mm

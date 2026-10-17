@@ -1,4 +1,3 @@
-import os
 import time
 
 import rclpy.action
@@ -8,7 +7,7 @@ import robomaster_msgs.msg
 
 from ..action import wait_action
 
-from typing import Any, Dict, Optional, cast
+from typing import Any, Optional, cast
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..client import RoboMasterROS
@@ -37,9 +36,6 @@ class ExtendedPlaySoundAction(robomaster.robot.RobotPlaySoundAction):  # type: i
         return proto
 
 
-robomaster.robot.RobotPlaySoundAction = ExtendedPlaySoundAction
-
-
 class Speaker(Module):
     def __init__(self, robot: robomaster.robot.Robot, node: 'RoboMasterROS') -> None:
         self.api = robot
@@ -53,8 +49,6 @@ class Speaker(Module):
             node, robomaster_msgs.action.PlaySound, "play", self.execute_play_sound,
             goal_callback=self.new_speaker_goal_callback,
             cancel_callback=self.cancel_callback, callback_group=cbg)
-        self._audio_files: Dict[int, str] = {}
-        self._audio_id = 0
 
     def play_action(self, sound_id: int, times: int = 1, control: int = 1
                     ) -> ExtendedPlaySoundAction:
@@ -72,25 +66,6 @@ class Speaker(Module):
     def has_received_play_command(self, msg: robomaster_msgs.msg.SpeakerCommand) -> None:
         self.play(sound_id=msg.sound_id, times=msg.times, control=msg.control)
 
-    # Using this version as it caches the files/sound_id
-    def load_audio(self, filename: str) -> int:
-        filename = os.path.abspath(filename)
-        for audio_id, name in self._audio_files.items():
-            if filename == name:
-                return 0xE0 + audio_id
-        if not os.path.exists(filename):
-            self.logger.warning(f"Loading audio: file {filename} does not exists")
-            return -1
-        if self.api._ftp.connected:
-            self._audio_id = (self._audio_id + 1) % 10
-            self._audio_files[self._audio_id] = filename
-            upload_file = f"/python/sdk_audio_{self._audio_id}.wav"
-            self.logger.info(f"Loading audio: file {filename} as sound {0xE0 + self._audio_id}")
-            self.api._ftp.upload(filename, upload_file)
-            return 0xE0 + self._audio_id
-        else:
-            return -1
-
     def stop(self) -> None:
         self._sound_action_server.destroy()
 
@@ -103,21 +78,23 @@ class Speaker(Module):
 
     def execute_play_sound(self, goal_handle: Any) -> robomaster_msgs.action.PlaySound.Result:
         request = goal_handle.request
-        if request.file:
-            sound_id = self.load_audio(request.file)
-        else:
-            sound_id = request.sound_id
-        if sound_id < 0:
-            goal_handle.abort()
-            self.logger.warning('Cannot play sound')
-            return robomaster_msgs.action.PlaySound.Result()
         try:
-            self.action = self.api.play_sound(sound_id=sound_id, times=request.times)
+            if request.file:
+                # EP firmware is reliable with the first custom audio slot; later
+                # SDK slots can report succeeded/aborted inconsistently.
+                self.api._audio_id = 0
+                self.action = self.api.play_audio(request.file)
+            else:
+                self.action = self.api.play_sound(sound_id=request.sound_id, times=request.times)
+            if self.action is None:
+                goal_handle.abort()
+                self.logger.warning('Cannot play sound')
+                return robomaster_msgs.action.PlaySound.Result()
+            self.logger.info(f"Start playing sound with request {request}")
         except RuntimeError as e:
             self.logger.warning(f'Cannot play sound: {e}')
             goal_handle.abort()
             return robomaster_msgs.action.PlaySound.Result()
-        self.logger.info(f"Start playing sound with request {request}")
         feedback_msg = robomaster_msgs.action.PlaySound.Feedback()
         feedback_msg.time = 0
         progress = 2.0
