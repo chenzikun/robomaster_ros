@@ -1,3 +1,4 @@
+import threading
 import time
 
 import rclpy.action
@@ -106,6 +107,30 @@ class Arm(Module):
             remove_action_with_target(
                 self.robot, robomaster.robotic_arm.RoboticArmMoveAction._target)
             self.action = action_fn(x=x_mm, y=z_mm)
+        timeout = self._arm_action_timeout(x_mm, z_mm, relative=relative)
+        threading.Thread(
+            target=self._wait_current_arm_action,
+            args=(self.action, timeout),
+            daemon=True,
+        ).start()
+
+    def _arm_action_timeout(self, x_mm: int, z_mm: int, *, relative: bool) -> float:
+        if relative:
+            distance_m = max(abs(x_mm), abs(z_mm)) * 0.001
+        else:
+            cur_x = getattr(self, 'x', x_mm)
+            cur_z = getattr(self, 'z', z_mm)
+            distance_m = max(abs(x_mm - cur_x), abs(z_mm - cur_z)) * 0.001
+        return max(1.0, distance_m / 0.02)
+
+    def _wait_current_arm_action(self, action: robomaster.action.Action, timeout: float) -> None:
+        def cb() -> None:
+            return None
+
+        ok = wait_action(action, cb, timeout=timeout)
+        self.logger.info(f'[Arm] Action finished ok={ok}: {action}')
+        if self.action is action:
+            self.action = None
 
     def has_received_velocity_command(self, msg: geometry_msgs.msg.Vector3) -> None:
         x = int(msg.x * 1000)
