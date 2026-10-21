@@ -1,5 +1,6 @@
 import threading
 import time
+import math
 
 import rclpy.action
 import robomaster.robot
@@ -21,6 +22,12 @@ if TYPE_CHECKING:
 from .. import Module
 from ..action import wait_action, abort_action, remove_action_with_target
 from ..utils import rate, nearest_rate, Rate
+
+SERVO_DIRECT_DEFAULT_PULSE_SEC = 0.18
+SERVO_DIRECT_DEFAULT_GAIN = 2200.0
+SERVO_DIRECT_DEFAULT_MAX_SPEED = 20.0
+SERVO_DIRECT_ZERO_EPS_M = 1e-6
+SERVO_DIRECT_MIN_PULSE_SEC = 0.05
 
 
 def arm_joint_state(left_motor: float, right_motor: float) -> Dict[str, float]:
@@ -45,6 +52,25 @@ class Arm(Module):
         left_motor_direction: int = node.declare_parameter('arm.left_motor.direction', 1).value
         right_motor_index: int = node.declare_parameter('arm.right_motor.index', 1).value
         left_motor_index: int = node.declare_parameter('arm.left_motor.index', 0).value
+        self.servo_direct_enabled: bool = node.declare_parameter(
+            'arm.servo_direct.enabled', True).value
+        self.servo_direct_pulse_sec: float = node.declare_parameter(
+            'arm.servo_direct.pulse_sec', SERVO_DIRECT_DEFAULT_PULSE_SEC).value
+        self.servo_direct_gain_x: float = node.declare_parameter(
+            'arm.servo_direct.gain_x', SERVO_DIRECT_DEFAULT_GAIN).value
+        self.servo_direct_gain_z: float = node.declare_parameter(
+            'arm.servo_direct.gain_z', SERVO_DIRECT_DEFAULT_GAIN).value
+        self.servo_direct_max_speed: float = node.declare_parameter(
+            'arm.servo_direct.max_speed', SERVO_DIRECT_DEFAULT_MAX_SPEED).value
+        self.servo_direct_left_x_sign: int = node.declare_parameter(
+            'arm.servo_direct.left_x_sign', 1).value
+        self.servo_direct_right_x_sign: int = node.declare_parameter(
+            'arm.servo_direct.right_x_sign', -1).value
+        self.servo_direct_left_z_sign: int = node.declare_parameter(
+            'arm.servo_direct.left_z_sign', 1).value
+        self.servo_direct_right_z_sign: int = node.declare_parameter(
+            'arm.servo_direct.right_z_sign', 1).value
+        self._servo_direct_stop_timer: Optional[threading.Timer] = None
         self.servos = {
             'right_motor': RMServo(
                 index=right_motor_index, reference_angle=right_motor_angle,
@@ -61,6 +87,9 @@ class Arm(Module):
         node.get_logger().info(
             f"[Arm] right servo: index {right_motor_index}, direction {right_motor_direction}, "
             f"value {right_motor_zero}, angle {right_motor_angle}")
+        node.get_logger().info(
+            f"[Arm] servo_direct={self.servo_direct_enabled} gain_x={self.servo_direct_gain_x} "
+            f"gain_z={self.servo_direct_gain_z} max_speed={self.servo_direct_max_speed}")
         self.arm_position_msg = geometry_msgs.msg.PointStamped()
         self.arm_position_msg.header.frame_id = node.tf_frame('arm_base_link')
         self.arm_position_msg.point.y = 0.0
@@ -133,6 +162,9 @@ class Arm(Module):
             self.action = None
 
     def has_received_velocity_command(self, msg: geometry_msgs.msg.Vector3) -> None:
+        if self.servo_direct_enabled:
+            self._drive_arm_servos(float(msg.x), float(msg.z))
+            return
         x = int(msg.x * 1000)
         z = int(msg.z * 1000)
         if x == 0 and z == 0:
@@ -140,9 +172,61 @@ class Arm(Module):
         self._start_arm_action(x, z, relative=True)
 
     def has_received_position_command(self, msg: geometry_msgs.msg.Point) -> None:
+        if self.servo_direct_enabled:
+            cur_x = getattr(self, 'x', None)
+            cur_z = getattr(self, 'z', None)
+            if cur_x is None or cur_z is None:
+                self.logger.warning('[Arm] servo direct target ignored: no arm position feedback yet')
+                return
+            dx = float(msg.x) - float(cur_x) * 0.001
+            dz = float(msg.z) - float(cur_z) * 0.001
+            self._drive_arm_servos(dx, dz)
+            return
         x = int(msg.x * 1000)
         z = int(msg.z * 1000)
         self._start_arm_action(x, z, relative=False)
+
+    def _drive_arm_servos(self, dx_m: float, dz_m: float) -> None:
+        if abs(dx_m) < SERVO_DIRECT_ZERO_EPS_M and abs(dz_m) < SERVO_DIRECT_ZERO_EPS_M:
+            self._pause_arm_servos()
+            return
+        left_speed = (
+            self.servo_direct_left_x_sign * dx_m * self.servo_direct_gain_x
+            + self.servo_direct_left_z_sign * dz_m * self.servo_direct_gain_z
+        )
+        right_speed = (
+            self.servo_direct_right_x_sign * dx_m * self.servo_direct_gain_x
+            + self.servo_direct_right_z_sign * dz_m * self.servo_direct_gain_z
+        )
+        left_speed = self._clamp_servo_speed(left_speed)
+        right_speed = self._clamp_servo_speed(right_speed)
+        self.robot.servo.drive_speed(index=self.servos['left_motor'].index + 1, speed=left_speed)
+        self.robot.servo.drive_speed(index=self.servos['right_motor'].index + 1, speed=right_speed)
+        self._schedule_servo_pause()
+        self.logger.debug(
+            f"[Arm] servo direct dx={dx_m:.4f} dz={dz_m:.4f} "
+            f"left={left_speed:.2f} right={right_speed:.2f}")
+
+    def _clamp_servo_speed(self, speed: float) -> float:
+        if not math.isfinite(speed):
+            return 0.0
+        limit = abs(float(self.servo_direct_max_speed))
+        return max(-limit, min(limit, float(speed)))
+
+    def _schedule_servo_pause(self) -> None:
+        if self._servo_direct_stop_timer:
+            self._servo_direct_stop_timer.cancel()
+        self._servo_direct_stop_timer = threading.Timer(
+            max(SERVO_DIRECT_MIN_PULSE_SEC, float(self.servo_direct_pulse_sec)), self._pause_arm_servos)
+        self._servo_direct_stop_timer.daemon = True
+        self._servo_direct_stop_timer.start()
+
+    def _pause_arm_servos(self) -> None:
+        if self._servo_direct_stop_timer:
+            self._servo_direct_stop_timer.cancel()
+            self._servo_direct_stop_timer = None
+        self.robot.servo.pause(index=self.servos['left_motor'].index + 1)
+        self.robot.servo.pause(index=self.servos['right_motor'].index + 1)
 
     def subscribe(self, rate: Rate) -> None:
         if rate:
@@ -167,6 +251,7 @@ class Arm(Module):
         return rcl_interfaces.msg.SetParametersResult(successful=True)
 
     def stop(self) -> None:
+        self._pause_arm_servos()
         self._move_arm_action_server.destroy()
         if self.node.connected:
             self.api.unsub_position()
