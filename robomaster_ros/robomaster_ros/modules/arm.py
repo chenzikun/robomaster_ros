@@ -195,12 +195,17 @@ class Arm(Module):
         if abs(dx_m) < SERVO_DIRECT_ZERO_EPS_M and abs(dz_m) < SERVO_DIRECT_ZERO_EPS_M:
             self._pause_arm_servos()
             return
-        if self.action is not None:
-            self.logger.debug(f"[Arm] skip jog while action is active: {self.action}")
-            return
-        x_mm = int(round(dx_m * ARM_MM_PER_M))
-        z_mm = int(round(dz_m * ARM_MM_PER_M))
-        self._start_arm_action(x_mm, z_mm, relative=True)
+        left_speed = self._clamp_servo_speed(
+            self.servo_direct_left_x_sign * dx_m * self.servo_direct_gain_x
+            + self.servo_direct_left_z_sign * dz_m * self.servo_direct_gain_z)
+        right_speed = self._clamp_servo_speed(
+            self.servo_direct_right_x_sign * dx_m * self.servo_direct_gain_x
+            + self.servo_direct_right_z_sign * dz_m * self.servo_direct_gain_z)
+        self.robot.servo.drive_speed(
+            index=self.servos['left_motor'].index + 1, speed=left_speed)
+        self.robot.servo.drive_speed(
+            index=self.servos['right_motor'].index + 1, speed=right_speed)
+        self._schedule_servo_pause()
 
     def _clamp_servo_speed(self, speed: float) -> float:
         if not math.isfinite(speed):
