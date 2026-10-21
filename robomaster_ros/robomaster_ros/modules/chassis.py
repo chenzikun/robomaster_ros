@@ -330,10 +330,8 @@ class Chassis(Module):
     def _chassis_zero_keepalive(self) -> None:
         if not self.node.connected:
             return
-        if self._last_twist_rx == 0.0:
-            return
         now = time.monotonic()
-        if (now - self._last_twist_rx) >= CHASSIS_CMD_STALE_SEC:
+        if self._last_twist_rx == 0.0 or (now - self._last_twist_rx) >= CHASSIS_CMD_STALE_SEC:
             self._stop_chassis_outputs()
 
     def engage(self, value: bool) -> None:
@@ -383,7 +381,7 @@ class Chassis(Module):
         self._move_action_server.destroy()
         self.engage_server.destroy()
         if self.node.connected:
-            self.api.drive_wheels(0, 0, 0, 0)
+            self._stop_chassis_outputs()
             self.unsubscribe()
             self.api.unsub_status()
 
