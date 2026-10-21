@@ -196,16 +196,13 @@ class Arm(Module):
         proto._x = int(round(dx_m * ARM_DIRECT_MM_PER_M))
         proto._y = int(round(dz_m * ARM_DIRECT_MM_PER_M))
         proto._z = 0
-        ok = self.api._send_sync_proto(
-            proto,
-            target=robomaster.robotic_arm.RoboticArmMoveAction._target,
-        )
+        ok = self.api._send_sync_proto(proto)
         if not ok:
             self.logger.warning(
                 f"[Arm] direct move rejected dx={dx_m:.4f} dz={dz_m:.4f} "
                 f"x_mm={proto._x} y_mm={proto._y}")
         else:
-            self.logger.info(
+            self.logger.debug(
                 f"[Arm] direct move dx={dx_m:.4f} dz={dz_m:.4f} "
                 f"x_mm={proto._x} y_mm={proto._y}")
 
