@@ -109,6 +109,12 @@ class Chassis(Module):
         self.api = robot.chassis
         desc = rcl_interfaces.msg.ParameterDescriptor(
             description=(
+                "When enabled, only subscribes to command topics and does not attach "
+                "chassis state streams or action/service control at startup."))
+        self.command_only: bool = node.declare_parameter(
+            "chassis.command_only", False, descriptor=desc).value
+        desc = rcl_interfaces.msg.ParameterDescriptor(
+            description=(
                 "When enabled, cmd_vel will control wheel state instead of chassis state."))
         self.twist_to_wheel_speeds: bool = node.declare_parameter(
             "chassis.twist_to_wheel_speeds", False, descriptor=desc).value
@@ -121,6 +127,19 @@ class Chassis(Module):
             self.logger.info("[Chassis] Topic cmd_vel will control wheel speeds")
         else:
             self.logger.info("[Chassis] Topic cmd_vel will control chassis twist")
+        self.action: Optional[robomaster.action.Action] = None
+        self._move_action_server: Optional[rclpy.action.ActionServer] = None
+        self.engage_server: Optional[Any] = None
+        self._last_twist_rx = 0.0
+        self._chassis_work_mode_started = False
+        node.create_subscription(geometry_msgs.msg.Twist, 'cmd_vel', self.has_received_twist, 1)
+        node.create_subscription(
+            robomaster_msgs.msg.WheelSpeeds, 'cmd_wheels', self.has_received_wheel_speeds, 1)
+        node.add_on_set_parameters_callback(self.set_params_cb)
+        node.create_timer(1.0 / CHASSIS_ZERO_KEEPALIVE_HZ, self._chassis_zero_keepalive)
+        if self.command_only:
+            self.logger.info("[Chassis] command_only=true: startup will not touch chassis state/control")
+            return
         self.odom_frame = node.tf_frame('odom')
         self.base_link = node.tf_frame('base_link')
         desc = rcl_interfaces.msg.ParameterDescriptor(
@@ -193,12 +212,7 @@ class Chassis(Module):
         if status_rate:
             self.api.sub_status(freq=status_rate, callback=self.updated_status)
 
-        node.create_subscription(geometry_msgs.msg.Twist, 'cmd_vel', self.has_received_twist, 1)
-        node.create_subscription(
-            robomaster_msgs.msg.WheelSpeeds, 'cmd_wheels', self.has_received_wheel_speeds, 1)
-
         # self.goal_handle: Optional[rclpy.action.server.ServerGoalHandle] = None
-        self.action: Optional[robomaster.action.Action] = None
         cbg = rclpy.callback_groups.MutuallyExclusiveCallbackGroup()
         self._move_action_server = rclpy.action.ActionServer(
             node, robomaster_msgs.action.Move, 'move', self.execute_move_callback,
@@ -206,9 +220,6 @@ class Chassis(Module):
             cancel_callback=self.cancel_move_callback, callback_group=cbg)
         self.engage_server = node.create_service(std_srvs.srv.SetBool, 'engage_wheels',
                                                  self.engage_cb)
-        node.add_on_set_parameters_callback(self.set_params_cb)
-        self._last_twist_rx = 0.0
-        node.create_timer(1.0 / CHASSIS_ZERO_KEEPALIVE_HZ, self._chassis_zero_keepalive)
         # Startup safety is handled by ep-chassis-preflight-stop.py in a separate SDK session.
         # Do not touch chassis control here; even zero-speed commands can wake idle EP wheels.
 
@@ -328,8 +339,18 @@ class Chassis(Module):
         self.api.drive_wheels(0, 0, 0, 0, timeout=self.timeout)
         self.api.drive_speed(x=0.0, y=0.0, z=0.0, timeout=self.timeout)
 
+    def _ensure_chassis_work_mode(self) -> None:
+        if self._chassis_work_mode_started:
+            return
+        proto = robomaster.protocol.ProtoChassisSetWorkMode()
+        proto._mode = CHASSIS_WORK_MODE_SDK
+        self.api._send_sync_proto(proto)
+        self._chassis_work_mode_started = True
+
     def _chassis_zero_keepalive(self) -> None:
         if not self.node.connected:
+            return
+        if not self._chassis_work_mode_started:
             return
         if self._last_twist_rx == 0.0:
             return
@@ -339,10 +360,11 @@ class Chassis(Module):
 
     def engage(self, value: bool) -> None:
         # Work mode 0 makes EP reject arm actions until the SDK reconnects.
-        proto = robomaster.protocol.ProtoChassisSetWorkMode()
-        proto._mode = CHASSIS_WORK_MODE_SDK
-        self.api._send_sync_proto(proto)
-        self._stop_chassis_outputs()
+        if value:
+            self._ensure_chassis_work_mode()
+            self._stop_chassis_outputs()
+        elif self._chassis_work_mode_started:
+            self._stop_chassis_outputs()
         self.logger.info(f"{'[Chassis] Engaged' if value else 'Disengaged'} wheel motors")
 
     def engage_cb(self, request: std_srvs.srv.SetBool.Request,
@@ -378,18 +400,24 @@ class Chassis(Module):
         self.api.unsub_esc()
 
     def stop(self) -> None:
-        self._move_action_server.destroy()
-        self.engage_server.destroy()
+        if self._move_action_server:
+            self._move_action_server.destroy()
+        if self.engage_server:
+            self.engage_server.destroy()
         if self.node.connected:
-            self._stop_chassis_outputs()
-            self.unsubscribe()
-            self.api.unsub_status()
+            if self._chassis_work_mode_started:
+                self._stop_chassis_outputs()
+            if not self.command_only:
+                self.unsubscribe()
+                self.api.unsub_status()
 
     def has_received_twist(self, msg: geometry_msgs.msg.Twist) -> None:
         self._last_twist_rx = time.monotonic()
         if self._twist_is_zero(msg):
-            self._stop_chassis_outputs()
+            if self._chassis_work_mode_started:
+                self._stop_chassis_outputs()
             return
+        self._ensure_chassis_work_mode()
         if self.twist_to_wheel_speeds:
             front_left, front_right, rear_left, rear_right = wheel_speeds_from_twist(
                 msg.linear.x, msg.linear.y, msg.angular.z)
@@ -402,6 +430,7 @@ class Chassis(Module):
                 x=msg.linear.x, y=-msg.linear.y, z=-deg(msg.angular.z), timeout=self.timeout)
 
     def has_received_wheel_speeds(self, msg: robomaster_msgs.msg.WheelSpeeds) -> None:
+        self._ensure_chassis_work_mode()
         self.api.drive_wheels(
             w1=rpm_from_linear_speed(msg.front_right), w2=rpm_from_linear_speed(msg.front_left),
             w3=rpm_from_linear_speed(msg.rear_left), w4=rpm_from_linear_speed(msg.rear_right),

@@ -76,6 +76,7 @@
 
   <!-- CHASSIS -->
   <arg name="chassis" default="true" description="Enables chassis module, see :ros:param:`chassis.enabled` "/>
+  <arg name="chassis_command_only" default="false" description="Only enable chassis command topics without state subscriptions or startup control"/>
   <arg name="chassis_rate" default="10" description="Chassis update rate: one of 0, 1, 5, 10, 20, 50. See :ros:param:`chassis.rate`"/>
   <arg name="chassis_status_rate" default="1" description="Chassis status update rate: one of 0, 1, 5, 10, 20, 50. See :ros:param:`chassis.rate`"/>
   <arg name="chassis_timeout" default="0.0" description="Chassis control timeout in seconds. See :ros:param:`chassis.timeout`"/>
@@ -174,6 +175,7 @@
     </param>
     <param name="chassis">
       <param name="enabled" value="$(var chassis)"/>
+      <param name="command_only" value="$(var chassis_command_only)"/>
       <param name="rate" value="$(var chassis_rate)"/>
       <param name="status.rate" value="$(var chassis_status_rate)"/>
       <param name="timeout" value="$(var chassis_timeout)"/>
