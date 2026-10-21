@@ -38,6 +38,7 @@ DEFAULT_ACCELERATION_ERROR = 0.1
 TWIST_ZERO_EPS = 1e-4
 CHASSIS_ZERO_KEEPALIVE_HZ = 20.0
 CHASSIS_CMD_STALE_SEC = 0.2
+CHASSIS_WORK_MODE_SDK = 1
 
 
 # rmp -> [linear] speed
@@ -335,14 +336,11 @@ class Chassis(Module):
             self._stop_chassis_outputs()
 
     def engage(self, value: bool) -> None:
-        # Sending work mode 0 makes EP reject arm actions until the SDK reconnects.
-        if value:
-            proto = robomaster.protocol.ProtoChassisSetWorkMode()
-            proto._mode = 1
-            self.api._send_sync_proto(proto)
-            self._stop_chassis_outputs()
-        else:
-            self._stop_chassis_outputs()
+        # Work mode 0 makes EP reject arm actions until the SDK reconnects.
+        proto = robomaster.protocol.ProtoChassisSetWorkMode()
+        proto._mode = CHASSIS_WORK_MODE_SDK
+        self.api._send_sync_proto(proto)
+        self._stop_chassis_outputs()
         self.logger.info(f"{'[Chassis] Engaged' if value else 'Disengaged'} wheel motors")
 
     def engage_cb(self, request: std_srvs.srv.SetBool.Request,
