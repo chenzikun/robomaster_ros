@@ -187,7 +187,7 @@ class Chassis(Module):
             robomaster_msgs.msg.ChassisStatus, 'state', 1)
         chassis_rate = rate(node, 'chassis', 10)
         status_rate = rate(node, 'chassis.status', 1)
-        self.position_period = 1.0 / chassis_rate
+        self.position_period = 1.0 / chassis_rate if chassis_rate else 0.0
         if chassis_rate:
             self.subscribe(chassis_rate)
         if status_rate:
