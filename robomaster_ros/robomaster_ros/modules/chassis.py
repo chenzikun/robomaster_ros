@@ -38,6 +38,7 @@ DEFAULT_ACCELERATION_ERROR = 0.1
 TWIST_ZERO_EPS = 1e-4
 CHASSIS_ZERO_KEEPALIVE_HZ = 20.0
 CHASSIS_CMD_STALE_SEC = 0.2
+CHASSIS_WORK_MODE_IDLE = 0
 CHASSIS_WORK_MODE_SDK = 1
 
 
@@ -131,14 +132,16 @@ class Chassis(Module):
         self._move_action_server: Optional[rclpy.action.ActionServer] = None
         self.engage_server: Optional[Any] = None
         self._last_twist_rx = 0.0
-        self._chassis_work_mode_started = False
+        self._chassis_work_mode: Optional[int] = None
+        self._chassis_command_active = False
         node.create_subscription(geometry_msgs.msg.Twist, 'cmd_vel', self.has_received_twist, 1)
         node.create_subscription(
             robomaster_msgs.msg.WheelSpeeds, 'cmd_wheels', self.has_received_wheel_speeds, 1)
         node.add_on_set_parameters_callback(self.set_params_cb)
         node.create_timer(1.0 / CHASSIS_ZERO_KEEPALIVE_HZ, self._chassis_zero_keepalive)
         if self.command_only:
-            self.logger.info("[Chassis] command_only=true: startup will not touch chassis state/control")
+            self._set_chassis_work_mode(CHASSIS_WORK_MODE_IDLE)
+            self.logger.info("[Chassis] command_only=true: startup is in chassis idle mode")
             return
         self.odom_frame = node.tf_frame('odom')
         self.base_link = node.tf_frame('base_link')
@@ -339,32 +342,42 @@ class Chassis(Module):
         self.api.drive_wheels(0, 0, 0, 0, timeout=self.timeout)
         self.api.drive_speed(x=0.0, y=0.0, z=0.0, timeout=self.timeout)
 
-    def _ensure_chassis_work_mode(self) -> None:
-        if self._chassis_work_mode_started:
+    def _set_chassis_work_mode(self, mode: int) -> None:
+        if self._chassis_work_mode == mode:
             return
         proto = robomaster.protocol.ProtoChassisSetWorkMode()
-        proto._mode = CHASSIS_WORK_MODE_SDK
+        proto._mode = mode
         self.api._send_sync_proto(proto)
-        self._chassis_work_mode_started = True
+        self._chassis_work_mode = mode
+
+    def _ensure_chassis_work_mode(self) -> None:
+        self._set_chassis_work_mode(CHASSIS_WORK_MODE_SDK)
+
+    def _enter_chassis_idle_mode(self) -> None:
+        if self.command_only:
+            if self._chassis_work_mode == CHASSIS_WORK_MODE_SDK:
+                self._stop_chassis_outputs()
+            self._set_chassis_work_mode(CHASSIS_WORK_MODE_IDLE)
+        else:
+            self._stop_chassis_outputs()
+        self._chassis_command_active = False
 
     def _chassis_zero_keepalive(self) -> None:
         if not self.node.connected:
             return
-        if not self._chassis_work_mode_started:
-            return
-        if self._last_twist_rx == 0.0:
+        if not self._chassis_command_active or self._last_twist_rx == 0.0:
             return
         now = time.monotonic()
         if (now - self._last_twist_rx) >= CHASSIS_CMD_STALE_SEC:
-            self._stop_chassis_outputs()
+            self._enter_chassis_idle_mode()
 
     def engage(self, value: bool) -> None:
         # Work mode 0 makes EP reject arm actions until the SDK reconnects.
         if value:
             self._ensure_chassis_work_mode()
             self._stop_chassis_outputs()
-        elif self._chassis_work_mode_started:
-            self._stop_chassis_outputs()
+        else:
+            self._enter_chassis_idle_mode()
         self.logger.info(f"{'[Chassis] Engaged' if value else 'Disengaged'} wheel motors")
 
     def engage_cb(self, request: std_srvs.srv.SetBool.Request,
@@ -405,7 +418,9 @@ class Chassis(Module):
         if self.engage_server:
             self.engage_server.destroy()
         if self.node.connected:
-            if self._chassis_work_mode_started:
+            if self.command_only:
+                self._enter_chassis_idle_mode()
+            elif self._chassis_work_mode == CHASSIS_WORK_MODE_SDK:
                 self._stop_chassis_outputs()
             if not self.command_only:
                 self.unsubscribe()
@@ -414,10 +429,10 @@ class Chassis(Module):
     def has_received_twist(self, msg: geometry_msgs.msg.Twist) -> None:
         self._last_twist_rx = time.monotonic()
         if self._twist_is_zero(msg):
-            if self._chassis_work_mode_started:
-                self._stop_chassis_outputs()
+            self._enter_chassis_idle_mode()
             return
         self._ensure_chassis_work_mode()
+        self._chassis_command_active = True
         if self.twist_to_wheel_speeds:
             front_left, front_right, rear_left, rear_right = wheel_speeds_from_twist(
                 msg.linear.x, msg.linear.y, msg.angular.z)
@@ -431,6 +446,7 @@ class Chassis(Module):
 
     def has_received_wheel_speeds(self, msg: robomaster_msgs.msg.WheelSpeeds) -> None:
         self._ensure_chassis_work_mode()
+        self._chassis_command_active = True
         self.api.drive_wheels(
             w1=rpm_from_linear_speed(msg.front_right), w2=rpm_from_linear_speed(msg.front_left),
             w3=rpm_from_linear_speed(msg.rear_left), w4=rpm_from_linear_speed(msg.rear_right),
