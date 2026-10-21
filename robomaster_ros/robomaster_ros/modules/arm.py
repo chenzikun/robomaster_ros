@@ -28,7 +28,7 @@ SERVO_DIRECT_DEFAULT_GAIN = 2200.0
 SERVO_DIRECT_DEFAULT_MAX_SPEED = 20.0
 SERVO_DIRECT_ZERO_EPS_M = 1e-6
 SERVO_DIRECT_MIN_PULSE_SEC = 0.05
-ARM_DIRECT_MM_PER_M = 1000.0
+ARM_MM_PER_M = 1000.0
 
 
 def arm_joint_state(left_motor: float, right_motor: float) -> Dict[str, float]:
@@ -191,20 +191,12 @@ class Arm(Module):
         if abs(dx_m) < SERVO_DIRECT_ZERO_EPS_M and abs(dz_m) < SERVO_DIRECT_ZERO_EPS_M:
             self._pause_arm_servos()
             return
-        proto = robomaster.protocol.ProtoRoboticArmMove()
-        proto._type = 0
-        proto._x = int(round(dx_m * ARM_DIRECT_MM_PER_M))
-        proto._y = int(round(dz_m * ARM_DIRECT_MM_PER_M))
-        proto._z = 0
-        ok = self.api._send_sync_proto(proto)
-        if not ok:
-            self.logger.warning(
-                f"[Arm] direct move rejected dx={dx_m:.4f} dz={dz_m:.4f} "
-                f"x_mm={proto._x} y_mm={proto._y}")
-        else:
-            self.logger.debug(
-                f"[Arm] direct move dx={dx_m:.4f} dz={dz_m:.4f} "
-                f"x_mm={proto._x} y_mm={proto._y}")
+        if self.action is not None:
+            self.logger.debug(f"[Arm] skip jog while action is active: {self.action}")
+            return
+        x_mm = int(round(dx_m * ARM_MM_PER_M))
+        z_mm = int(round(dz_m * ARM_MM_PER_M))
+        self._start_arm_action(x_mm, z_mm, relative=True)
 
     def _clamp_servo_speed(self, speed: float) -> float:
         if not math.isfinite(speed):
