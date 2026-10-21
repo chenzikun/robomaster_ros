@@ -337,14 +337,13 @@ class Chassis(Module):
             self._stop_chassis_outputs()
 
     def engage(self, value: bool) -> None:
-        # Sending work mode 0 makes EP reject arm actions until the SDK reconnects.
+        proto = robomaster.protocol.ProtoChassisSetWorkMode()
+        proto._mode = 1 if value else 0
+        self.api._send_sync_proto(proto)
         if value:
-            proto = robomaster.protocol.ProtoChassisSetWorkMode()
-            proto._mode = 1
-            self.api._send_sync_proto(proto)
             self._stop_chassis_outputs()
         else:
-            self._stop_chassis_outputs()
+            self.api.drive_wheels(0, 0, 0, 0)
         self.logger.info(f"{'[Chassis] Engaged' if value else 'Disengaged'} wheel motors")
 
     def engage_cb(self, request: std_srvs.srv.SetBool.Request,
