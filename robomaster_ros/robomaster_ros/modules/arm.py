@@ -125,6 +125,10 @@ class Arm(Module):
                 abort_action(self.robot, self.action)
             except Exception as exc:
                 self.logger.warning(f'[Arm] Failed aborting previous action: {exc}')
+        try:
+            self.robot.set_robot_mode(robomaster.robot.FREE)
+        except Exception as exc:
+            self.logger.warning(f'[Arm] Failed setting robot mode free before move: {exc}')
         action_fn = self.api.move if relative else self.api.moveto
         try:
             self.action = action_fn(x=x_mm, y=z_mm)
