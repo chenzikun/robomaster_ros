@@ -209,8 +209,8 @@ class Chassis(Module):
         node.add_on_set_parameters_callback(self.set_params_cb)
         self._last_twist_rx = 0.0
         node.create_timer(1.0 / CHASSIS_ZERO_KEEPALIVE_HZ, self._chassis_zero_keepalive)
-        # EP keeps chassis work mode across driver restarts; always start from a safe, disengaged state.
-        self.engage(False)
+        # Startup safety is handled by ep-chassis-preflight-stop.py in a separate SDK session.
+        # Do not touch chassis control here; even zero-speed commands can wake idle EP wheels.
 
     @property
     def odom_twist_in_odom(self) -> bool:
@@ -331,8 +331,10 @@ class Chassis(Module):
     def _chassis_zero_keepalive(self) -> None:
         if not self.node.connected:
             return
+        if self._last_twist_rx == 0.0:
+            return
         now = time.monotonic()
-        if self._last_twist_rx == 0.0 or (now - self._last_twist_rx) >= CHASSIS_CMD_STALE_SEC:
+        if (now - self._last_twist_rx) >= CHASSIS_CMD_STALE_SEC:
             self._stop_chassis_outputs()
 
     def engage(self, value: bool) -> None:
